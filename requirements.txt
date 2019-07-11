@@ -1,0 +1,8 @@
+bottle==0.12.17
+numpy==1.16.4
+opencv-python==4.1.0
+Pillow==6.0.0
+PyPDF2==1.26.0
+pytesseract==0.2.7
+urllib3==1.25.3
+Wand==0.5.4
