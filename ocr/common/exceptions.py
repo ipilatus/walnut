@@ -2,10 +2,8 @@ from http import HTTPStatus
 # from .i18n import _
 
 JSONAPI_ERROR_CODE = 9000
-SQLALCHEMY_ERROR_CODE = 9001
-AUTH_TOKEN_NOT_FOUND_ERROR_CODE = 9002
-ENDPOINT_NOT_FOUND_ERROR_CODE = 9003
-HEADER_NOT_FOUND_ERROR_CODE = 9004
+AUTH_TOKEN_NOT_FOUND_ERROR_CODE = 9001
+HEADER_NOT_FOUND_ERROR_CODE = 9002
 
 
 class JsonApiError(Exception):
@@ -56,16 +54,3 @@ class AuthTokenNotFoundError(JsonApiError):
 
     def __init__(self, *args, **kwargs):
         super(AuthTokenNotFoundError, self).__init__(self._msg_fmt, **kwargs)
-
-
-class EndPointNotFoundError(JsonApiError):
-    """
-    EndPoint 找不到
-    """
-    _status_code = HTTPStatus.FORBIDDEN.value
-    _error = 'endpoint not found'
-    _error_code = ENDPOINT_NOT_FOUND_ERROR_CODE
-    _msg_fmt = 'endpoint %(endpoint)s not found'
-
-    def __init__(self, *args, **kwargs):
-        super(EndPointNotFoundError, self).__init__(self._msg_fmt, **kwargs)

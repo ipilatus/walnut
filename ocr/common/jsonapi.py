@@ -9,9 +9,8 @@ from bottle import request
 from bottle import response
 from bottle import template
 from bottle import tob
-# from sqlalchemy.exc import SQLAlchemyError
 
-from .exceptions import JsonApiError, SQLALCHEMY_ERROR_CODE
+from .exceptions import JsonApiError
 
 logger = logging.getLogger(__name__)
 
@@ -109,18 +108,6 @@ class JsonFormatting(object):
                 response.content_type = 'application/json'
                 response.status = e.status_code
                 return json_response
-
-            # except SQLAlchemyError as e:
-            #     logger.exception('SQLAlchemyError, %s', e)
-            #     response_object = self.get_response_object(1)
-            #     response_object['error'] = {
-            #         'error_code': SQLALCHEMY_ERROR_CODE,
-            #         'error': 'SQLAlchemy Error',
-            #         'message': str(e)
-            #     }
-            #     json_response = json_dumps(response_object)
-            #     response.content_type = 'application/json'
-            #     return json_response
 
         return wrapper
 

@@ -17,3 +17,8 @@ class LangType:
     CHI_TRA = 'chi_tra'
     ENG = 'eng'
     JPN = 'jpn'
+
+
+class ProtocolType:
+    """ 连接协议类型 """
+    SMB = 'smb'

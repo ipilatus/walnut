@@ -1,17 +1,18 @@
 import json
 import logging
 import os
-from multiprocessing import Pool, Process
 
 import pytesseract as ts
 from bottle import request
 
 from ocr.api import FileType
 from ocr.api import LangType
+from ocr.api import ProtocolType
 from ocr.api import RecognitionMixin
 from ocr.api import optImageForOCR
 from ocr.api import run_tesseract
 from ocr.common.base import Base
+from ocr.api.exceptions import ParameterError, UniversalCharacterRecognitioError
 
 logger = logging.getLogger(__name__)
 
@@ -56,49 +57,63 @@ class Recognition(Base, RecognitionMixin):
             file = request.files.get('file')
             input = json.loads(request.forms.get('inputInfo')) if request.forms.get('inputInfo') else None
             output = json.loads(request.forms.get('outputInfo')) if request.forms.get('outputInfo') else None
+            encrypt_decrypt = json.loads(request.forms.get('encryptDecrypt')) if request.forms.get('encryptDecrypt') else None
             logger.debug('param: %s', json.dumps(request.forms.dict))
-            file_type = file.content_type.rsplit('/', 1)[1]
-            filename = ''
+            encrypt_flag = decrypt_flag = True if encrypt_decrypt else False
 
-            input_file = file or input
-            # file_type = ''
-            # filename = ''
+            input_folder, process_folder, output_folder, now_timestamp = self.make_dir()
 
-            # if file:
-            #     file_type = file.content_type.rsplit('/', 1)[1]
-            #     filename = ''
-            #
-            # if input:
-            #     host = input['host']
-            #     host_name = input['hostName']
-            #     username = input['userName']
-            #     password = input['password']
-            #     shared_folder_name = input['sharedFolderName']
-            #     remote_file_path = input['remoteFilePath']
-            #     self.smb_manger(host, host_name, username, password, shared_folder_name, remote_file_path,
-            #                local_file_path, 'download')
+            file_type = ''
+            no_extension_filename = ''
+            input_file_path = ''
 
-            if file and self.allowed_lang(lang) \
-                    and self.allowed_input_file_type(file_type) \
+            if file:
+                filename = file.filename
+                no_extension_filename, file_type = os.path.splitext(filename)
+                input_file_path = os.path.join(input_folder, file.filename)
+                file.save(input_file_path)
+                logger.debug('input file path: %s, file save successful.', input_file_path)
+
+            elif input:
+                protocol = input['protocol']
+                host = input['host']
+                host_name = input['hostName']
+                username = input['userName']
+                password = input['password']
+                domain = input['domain'] or ''
+                remote_file_path = input['filePath']
+
+                shared_folder_name = remote_file_path.split('\\')[0]
+                _, filename = os.path.split(remote_file_path)
+                no_extension_filename, file_type = os.path.splitext(filename)
+
+                input_file_path = os.path.join(input_folder, filename)
+
+                if protocol == ProtocolType.SMB:
+                    self.download_file_by_smb(host, host_name, username, password, domain, shared_folder_name, remote_file_path,
+                                              input_file_path)
+                else:
+                    raise ParameterError(parameter='protocol', parameter_value=protocol)
+
+            else:
+                raise ParameterError(parameter='file', parameter_value='None')
+
+            if decrypt_flag:
+                aes_mode = encrypt_decrypt['mode']
+                aes_key = encrypt_decrypt['key']
+                aes_offset = encrypt_decrypt['offset']
+                aes_encoded = encrypt_decrypt.get('encoded')
+                # aes_complement = encrypt_decrypt.get('complement')
+
+                self.aes_decrypt(input_file_path, aes_key, aes_offset, aes_mode, aes_encoded)
+
+            if self.allowed_lang(lang) and self.allowed_input_file_type(file_type) \
                     and self.allowed_output_type(output_type):
                 config = '--oem 1 --dpi ' + dpi if dpi else '--oem 1'
                 lang = lang[0] if len(lang) == 1 else '+'.join(lang)
                 logger.debug('lang: %s', lang)
                 logger.debug('config: %s', config)
                 logger.debug('upload file type: %s', file_type)
-
-                filename_list = file.filename.split('.')
-                if len(filename_list) > 2:
-                    for i in range(0, len(filename_list) - 1):
-                        filename += filename_list[i]
-                else:
-                    filename = filename_list[0]
-
-                input_folder, process_folder, output_folder, now_timestamp = self.make_folder(filename)
-
-                input_file_path = os.path.join(input_folder, PREFIX + now_timestamp + os.extsep + file_type)
-                file.save(input_file_path)
-                logger.debug('input file path: %s, file save successful.', input_file_path)
 
                 kwargs = {
                     'lang': lang,
@@ -109,10 +124,8 @@ class Recognition(Base, RecognitionMixin):
                     'input_file_path': input_file_path,
                     'process_folder': process_folder,
                     'output_folder': output_folder,
-                    'output_filename': filename + SUFFIX
+                    'output_filename': no_extension_filename + SUFFIX
                 }
-
-                local_file_path = ''
 
                 if file_type == FileType.PDF:
                     self.handle_pdf(**kwargs)
@@ -123,6 +136,9 @@ class Recognition(Base, RecognitionMixin):
                 if file_type in [FileType.JPG, FileType.JPEG, FileType.PNG]:
                     self.handle_jpg_or_png(**kwargs)
 
+            else:
+                raise ParameterError(parameter='parameter', parameter_value=str(lang + 'or' + file_type + 'or' + output_type))
+
             if output:
                 protocol = output['protocol']
                 share_folder_name = output['sharedFolderName']
@@ -132,17 +148,33 @@ class Recognition(Base, RecognitionMixin):
                 username = output['userName']
                 password = output['password']
                 overwrite = output.get('overwrite', False)
-                output_file_name = filename if overwrite else filename + SUFFIX
+                output_file_name = no_extension_filename if overwrite else no_extension_filename + SUFFIX
 
-                if protocol == 'smb':
-                    self.smb_manger(host, port, username, password, share_folder_name, url, output_file_name)
+                # search output_folder
+                output_folder_dir = os.listdir(output_folder)
+
+                for i in output_folder_dir:
+
+                    result_file_path = os.path.join(output_folder, i)
+                    logger.debug('AED or SMB file path', result_file_path)
+
+                    if decrypt_flag:
+                        aes_mode = encrypt_decrypt['mode']
+                        aes_key = encrypt_decrypt['key']
+                        aes_offset = encrypt_decrypt['offset']
+                        aes_encoded = encrypt_decrypt.get('encoded')
+                        # aes_complement = encrypt_decrypt.get('complement')
+
+                        self.aes_decrypt(result_file_path, aes_key, aes_offset, aes_mode, aes_encoded)
+
+                    if protocol == 'smb':
+                        self.upload_file_by_smb(host, port, username, password, share_folder_name, url, result_file_path)
 
             if callback_url:
                 self.ocr_finished()
 
         except Exception as e:
-            logger.error('ocr failed')
-            raise e
+            raise UniversalCharacterRecognitioError(data=str(e))
 
     def allowed_lang(self, lang):
         return lang and len(lang) <= 2 and set(lang).issubset(DEFAULT_LANG)
@@ -180,7 +212,7 @@ class Recognition(Base, RecognitionMixin):
 
             if extension == FileType.PDF:
 
-                pool = Pool(processes=4)
+                # pool = Pool(processes=4)
 
                 for i in image_dir:
                     if i.split('.')[1] != FileType.JPG: continue
@@ -190,14 +222,14 @@ class Recognition(Base, RecognitionMixin):
                     logger.debug('image file path: %s' % image_file_path)
                     logger.debug('result file path: %s' % result_file_path)
 
-                    pool.apply_async(func=image_to_pdf_or_hocr_wrapper, args=(image_file_path, result_file_path, lang, config))
+                    # pool.apply_async(func=image_to_pdf_or_hocr_wrapper, args=(image_file_path, result_file_path, lang, config))
 
-                    # data = ts.image_to_pdf_or_hocr(image_file_path, lang, config)
-                    # with open(result_file_path, 'wb') as f:
-                    #     f.write(data)
+                    data = ts.image_to_pdf_or_hocr(image_file_path, lang, config)
+                    with open(result_file_path, 'wb') as f:
+                        f.write(data)
 
-                pool.close()
-                pool.join()
+                # pool.close()
+                # pool.join()
 
                 self.merge_pdf(process_folder, output_folder, output_filename)
 
@@ -273,7 +305,7 @@ class Recognition(Base, RecognitionMixin):
             output_filename_base = os.path.join(output_folder, output_filename)
             run_tesseract(input_file_path, output_filename_base, output_type, lang, config)
 
-    def handle_jpg_or_png(self, lang, output_type, config, correct, enhance, input_file_path, process_folder, output_folder, output_filename):
+    def handle_jpg_or_png(self, lang, output_type, config, correct, enhance, input_file_path, process_folder, output_folder, output_filename, encrypt_decrypt):
         """
         传入文件格式为JPG/JPEG/PNG
         :param lang: 识别语言类型

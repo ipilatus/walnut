@@ -1,4 +1,3 @@
-from .. import evm_config as evm_config
 from bottle import BaseResponse
 
 

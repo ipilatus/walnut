@@ -1,8 +1,0 @@
-bottle==0.12.13
-SQLAlchemy==1.1.15
-redis==2.10.5
-bottle-sqlalchemy==0.4.3
-urllib3==1.21.1
-pytz==2017.2
-oslo.i18n==3.19.0
-tooz==1.58.0

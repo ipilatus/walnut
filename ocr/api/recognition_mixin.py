@@ -1,4 +1,4 @@
-
+import base64
 import datetime
 import io
 import logging
@@ -7,10 +7,16 @@ import time
 from http import HTTPStatus
 
 import urllib3
+from Crypto.Cipher import AES
+from Crypto.Util.Padding import pad
 from PyPDF2 import PdfFileReader, PdfFileWriter, PdfFileMerger
+from nmb.NetBIOS import NetBIOS
 from smb.SMBConnection import SMBConnection
 from wand.image import Image
 
+from ocr.api.exceptions import BackendStatusCodeError
+from ocr.api.exceptions import SMBConnectionError, PDFToJPGError, MergePDFError, TIFFToJPGError, MergeTIFFError, \
+    MergeTxtError, MakeDirError
 from ocr.api.type import FileType
 from ocr.config import base_folder, input_folder_name, process_folder_name, output_folder_name
 
@@ -26,34 +32,100 @@ class RecognitionMixin:
         if resp.status == HTTPStatus.OK:
             logger.debug('request success. url: %s' % url)
         else:
-            logger.error('request fail. url: %s, code: %d' % (url, resp.status))
+            raise BackendStatusCodeError(except_code=HTTPStatus.OK, actual_code=resp.status)
 
-    def smb_manger(self, host, host_name, username, password, shared_folder_name, remote_file_path, local_file_path, operation):
+    def aes_decrypt(self, input_file_path, key, iv, mode, encoded):
         """
-        SMB Connection
+        AES 解密
+        :param input_file_path:
+        :param key:
+        :param iv:
+        :param mode:
+        :param encoded:
+        :return:
+        """
+        with open(input_file_path, 'rb') as f:
+            text = f.read()
+
+        data = base64.decodebytes(text) if encoded == 'base64' else text
+
+        cryptor = AES.new(key.encode('utf-8'), mode, iv.encode('utf-8'))
+        res = cryptor.decrypt(data)
+
+        with open(input_file_path, 'wb') as f:
+            f.write(res)
+
+    def aes_encrypt(self, text, result_file_path, key, iv, mode, encoded, style='pkcs7'):
+        """
+        AES 加密
+        :param text:
+        :param result_file_path:
+        :param key:
+        :param iv:
+        :param mode:
+        :param encoded:
+        :param style:
+        :return:
+        """
+        data = pad(text, AES.block_size, style)
+
+        cryptor = AES.new(key.encode('utf-8'), mode, iv)
+        cipher_text = cryptor.encrypt(data)
+
+        res = base64.b64encode(cipher_text) if encoded == 'base64' else cipher_text
+
+        with open(result_file_path, 'wb') as f:
+            f.write(res)
+
+    def get_BIOSName(self, host, timeout=30):
+        try:
+            bios = NetBIOS()
+            srv_name = bios.queryIPForName(host, timeout=timeout)
+
+        except Exception as e:
+            logger.error("Looking up timeout, check remote_smb_ip again. %s" % str(e))
+
+        finally:
+            bios.close()
+            return srv_name
+
+    def download_file_by_smb(self, host, host_name, username, password, domain, shared_folder_name, remote_file_path, local_file_path):
+        """
+        download file by SMB
         :param host: IP
         :param host_name: 域名
         :param username: 用户名
         :param password: 密码
+        :param domain: 域名
         :param shared_folder_name: 共享文件夹名称
         :param remote_file_path: 存放路径是相对共享文件夹的路径
         :param local_file_path: 本地文件路径
-        :param operation:  download:下载文件； upload:上传文件
         :return:
         """
         try:
-            conn = SMBConnection(username, password, '', host_name, use_ntlm_v2=True)
+            remote_name = host_name or self.get_BIOSName(host)
+            domain = domain or ''
+            conn = SMBConnection(username, password, '', remote_name, domain, use_ntlm_v2=True)
             assert conn.connect(host)
 
-            if operation == 'download':
-                # download file
-                with open(local_file_path, 'wb') as f:
-                    conn.retrieveFile(shared_folder_name, remote_file_path, f)
+            with open(local_file_path, 'wb') as f:
+                conn.retrieveFile(shared_folder_name, remote_file_path, f)
 
-            elif operation == 'upload':
-                # upload file
-                with open(local_file_path, 'rb') as f:
-                    conn.storeFile(shared_folder_name, remote_file_path, f)
+        except Exception as e:
+            raise SMBConnectionError(data=str(e))
+
+        finally:
+            conn.close()
+
+    def upload_file_by_smb(self, host, host_name, username, password, shared_folder_name, remote_file_path, local_file_path):
+        """ upload file by SMB """
+        try:
+            remote_name = host_name or self.get_BIOSName(host)
+            conn = SMBConnection(username, password, '', remote_name, use_ntlm_v2=True)
+            assert conn.connect(host)
+
+            with open(local_file_path, 'rb') as f:
+                conn.storeFile(shared_folder_name, remote_file_path, f)
 
         except Exception as e:
             logger.error('SMB file download error. %s' % str(e))
@@ -89,8 +161,7 @@ class RecognitionMixin:
                     f.save(filename=image_file_path)
 
         except Exception as e:
-            logger.error('pdf to jpg error!', e)
-            # TODO(): pdf to image error
+            raise PDFToJPGError(data=str(e))
 
     def merge_pdf(self, process_folder, output_folder, output_filename):
         """
@@ -116,8 +187,7 @@ class RecognitionMixin:
                 pdf_merger.write(f1)
 
         except Exception as e:
-            logger.error('merge pdf error!', e)
-            # TODO(): merge pdf file error
+            raise MergePDFError(data=str(e))
 
     def merge_txt(self, process_folder, output_folder, output_filename):
         """
@@ -143,7 +213,7 @@ class RecognitionMixin:
                         f.write('\n')
 
         except Exception as e:
-            logger.debug('merge txt error. %s', str(e))
+            raise MergeTxtError(data=str(e))
 
     def tiff_to_image(self, input_file_path, process_folder):
         """
@@ -152,7 +222,11 @@ class RecognitionMixin:
         :param process_folder:
         :return:
         """
-        pass
+        try:
+            pass
+
+        except Exception as e:
+            raise TIFFToJPGError(data=str(e))
 
     def merge_tiff(self, input_file_path, process_folder):
         """
@@ -161,9 +235,13 @@ class RecognitionMixin:
         :param process_folder:
         :return:
         """
-        pass
+        try:
+            pass
 
-    def make_folder(self, filename):
+        except Exception as e:
+            raise MergeTIFFError(data=str(e))
+
+    def make_dir(self, filename=None):
         try:
             date = datetime.datetime.now().strftime('%Y%m%d')
             now_timestamp = str(round(time.time() * 1000))
@@ -190,6 +268,4 @@ class RecognitionMixin:
             return input_folder, process_folder, output_folder, now_timestamp
 
         except Exception as e:
-            logger.error('create folder error', e)
-            # TODO(): create folder error
-            raise e
+            raise MakeDirError(data=str(e))
